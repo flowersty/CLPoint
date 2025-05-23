@@ -1,5 +1,4 @@
-// backend/server.js (COMPLETO Y FINAL - v4)
-// Incluye: Descuento stock por farmacia, guarda id_farmacia en ventas, manejo MP, Efectivo y Tarjeta
+// backend/server.js (COMPLETO Y FINAL - v4 con Tarjeta + FIX LOGGING)
 
 require('dotenv').config(); // Carga variables de ./backend/.env
 const express = require('express');
@@ -43,10 +42,12 @@ app.use(cors()); // Habilitar CORS para permitir peticiones desde tu frontend
 app.use('/mercado_pago_webhook', express.raw({ type: 'application/json' }));
 // Middleware para parsear JSON en todas las demás rutas
 app.use(express.json());
-// Middleware simple para loggear cada petición recibida (opcional)
+
+// Middleware simple para loggear cada petición recibida (CORRECCIÓN APLICADA AQUÍ)
 app.use((req, res, next) => {
     console.log(`\n➡️  ${req.method} ${req.path}`);
-    if (Object.keys(req.body).length > 0 && req.path !== '/mercado_pago_webhook') { // No loggear cuerpo raw del webhook
+    // Asegura que req.body existe y es un objeto antes de intentar Object.keys()
+    if (req.body && Object.keys(req.body).length > 0 && req.path !== '/mercado_pago_webhook') {
         console.log("   Body:", JSON.stringify(req.body));
     }
     next();
@@ -190,8 +191,8 @@ app.post('/create_order', async (req, res) => {
             initialState = 'pendiente';
         } else if (payment_method === 'efectivo') {
             initialState = 'procesando_efectivo';
-        } else if (payment_method === 'tarjeta') { // Nuevo estado inicial para tarjeta
-            initialState = 'procesando_tarjeta'; // Puedes usar un estado específico o 'pendiente' si el flujo es manual
+        } else if (payment_method === 'tarjeta') { // Nuevo estado inicial
+            initialState = 'procesando_tarjeta';
         } else {
             initialState = 'desconocido'; // Fallback
         }
@@ -323,6 +324,7 @@ app.post('/mercado_pago_webhook', async (req, res) => {
 
     let notification;
     try {
+        // Asegúrate de que req.body sea un Buffer antes de toString()
         notification = JSON.parse(req.body.toString());
         console.log(`${logPrefix} Body parseado: Type=${notification?.type}, DataID=${notification?.data?.id}`);
     } catch (e) {
@@ -424,9 +426,6 @@ app.post('/mercado_pago_webhook', async (req, res) => {
 app.get('/', (req, res) => {
     res.send(`
         <h1>Backend POS v4 Funcionando</h1>
-        <p>Estado MP: ${isTestMode ? 'Prueba' : 'Producción'}</p>
-        <p>Supabase URL: ${supabaseUrl ? supabaseUrl.split('.')[0] + '.supabase.co' : 'No configurada'}</p>
-        <p>Timestamp: ${new Date().toISOString()}</p>
     `);
 });
 
@@ -441,7 +440,7 @@ app.listen(port, () => {
 });
 
 
-// --- Recordatorio: Función RPC 'descontar_stock' necesaria en Supabase (Sin cambios) ---
+// --- Recordatorio: Función RPC 'descontar_stock' necesaria en Supabase ---
 /*
 -- Asegúrate de haber ejecutado esto en tu Editor SQL de Supabase:
 
@@ -469,10 +468,10 @@ BEGIN
 
   -- Verificar si hay suficiente stock
   IF stock_actual < cantidad_a_descontar THEN
-    -- Puedes elegir: lanzar excepción para detener todo, o solo advertir y no descontar
-    RAISE WARNING 'Stock insuficiente para UPC % en farmacia ID %. Stock: %, Se necesita: %', item_upc, farmacia_id_param, stock_actual, cantidad_a_descontar;
-    -- RAISE EXCEPTION 'Stock insuficiente para UPC % en farmacia ID %. Stock: %, Se necesita: %', item_upc, farmacia_id_param, stock_actual, cantidad_a_descontar;
-    RETURN; -- Importante: Salir de la función si no hay stock
+    RAISE EXCEPTION 'Stock insuficiente para UPC % en farmacia ID %. Stock: %, Se necesita: %', item_upc, farmacia_id_param, stock_actual, cantidad_a_descontar;
+    -- Si prefieres solo advertir sin detener la transacción, usa RAISE WARNING y RETURN:
+    -- RAISE WARNING 'Stock insuficiente para UPC % en farmacia ID %. Stock: %, Se necesita: %', item_upc, farmacia_id_param, stock_actual, cantidad_a_descontar;
+    -- RETURN;
   END IF;
 
   -- Realizar el descuento si hay stock suficiente
@@ -485,3 +484,4 @@ END;
 $$;
 
 */
+
