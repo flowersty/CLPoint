@@ -1,5 +1,5 @@
-// backend/server.js (COMPLETO Y FINAL - v3)
-// Incluye: Descuento stock por farmacia, guarda id_farmacia en ventas, manejo MP y Efectivo
+// backend/server.js (COMPLETO Y FINAL - v4)
+// Incluye: Descuento stock por farmacia, guarda id_farmacia en ventas, manejo MP, Efectivo y Tarjeta
 
 require('dotenv').config(); // Carga variables de ./backend/.env
 const express = require('express');
@@ -138,7 +138,7 @@ async function deductStockForOrder(orderId, items) {
  * Recibe los detalles de la venta desde el frontend.
  * 1. Crea un registro en la tabla 'ventas' (guardando id_farmacia).
  * 2. Si es 'mercadoPagoQR', crea una preferencia de pago en MP y devuelve la URL.
- * 3. Si es 'efectivo', intenta descontar el stock y actualiza el estado de la venta.
+ * 3. Si es 'efectivo' o 'tarjeta', intenta descontar el stock y actualiza el estado de la venta.
  * Devuelve el ID de la orden y detalles relevantes (URL de MP o resultado de stock).
  */
 app.post('/create_order', async (req, res) => {
@@ -154,7 +154,8 @@ app.post('/create_order', async (req, res) => {
         console.warn(`${logPrefix} Rechazado: Monto inválido.`);
         return res.status(400).json({ message: 'Monto inválido.' });
     }
-    if (!payment_method || (payment_method !== 'efectivo' && payment_method !== 'mercadoPagoQR')) {
+    // CAMBIO: Añadir 'tarjeta' a los métodos de pago válidos
+    if (!payment_method || (payment_method !== 'efectivo' && payment_method !== 'mercadoPagoQR' && payment_method !== 'tarjeta')) {
         console.warn(`${logPrefix} Rechazado: Método de pago inválido.`);
          return res.status(400).json({ message: 'Método de pago inválido o faltante.' });
     }
@@ -183,13 +184,24 @@ app.post('/create_order', async (req, res) => {
     // --- 1. Crear la Orden en Supabase ---
     console.log(`${logPrefix} 1. Creando registro en tabla 'ventas'...`);
     try {
-        const initialState = payment_method === 'mercadoPagoQR' ? 'pendiente' : 'procesando_efectivo';
+        // CAMBIO: Estado inicial para 'tarjeta'
+        let initialState;
+        if (payment_method === 'mercadoPagoQR') {
+            initialState = 'pendiente';
+        } else if (payment_method === 'efectivo') {
+            initialState = 'procesando_efectivo';
+        } else if (payment_method === 'tarjeta') { // Nuevo estado inicial para tarjeta
+            initialState = 'procesando_tarjeta'; // Puedes usar un estado específico o 'pendiente' si el flujo es manual
+        } else {
+            initialState = 'desconocido'; // Fallback
+        }
+
         const { data: newOrderData, error: insertError } = await supabase
             .from('ventas')
             .insert({
                 monto_total: amount,
                 descripcion: finalDescription,
-                estado: initialState, // Pendiente para MP, Procesando para Efectivo
+                estado: initialState, // Pendiente para MP, Procesando para Efectivo/Tarjeta
                 metodo_pago_solicitado: payment_method,
                 paciente_id: paciente_id || null,
                 compra_sin_cuenta: Boolean(compra_sin_cuenta), // Asegurar booleano
@@ -246,9 +258,9 @@ app.post('/create_order', async (req, res) => {
         }
     }
 
-    // B) Efectivo
-    else if (payment_method === 'efectivo') {
-        console.log(`${logPrefix} 2. Procesando Venta Efectivo ${orderId}. Descontando stock...`);
+    // B) Efectivo O Tarjeta (se fusionan porque el flujo del backend es idéntico: confirmar y descontar stock)
+    else if (payment_method === 'efectivo' || payment_method === 'tarjeta') {
+        console.log(`${logPrefix} 2. Procesando Venta ${payment_method} para orden ${orderId}. Descontando stock...`);
         // Descontar stock inmediatamente
         const deductionResult = await deductStockForOrder(orderId, cartItems);
 
@@ -257,23 +269,25 @@ app.post('/create_order', async (req, res) => {
             console.log(`   ${logPrefix} Stock descontado. Marcando orden ${orderId} como 'pagada'.`);
             try {
                 const { error: updateStatusError } = await supabase.from('ventas').update({
-                    estado: 'pagada', metodo_pago_confirmado: 'efectivo', last_updated_at: new Date().toISOString()
+                    estado: 'pagada',
+                    metodo_pago_confirmado: payment_method, // Confirmar con el método recibido ('efectivo' o 'tarjeta')
+                    last_updated_at: new Date().toISOString()
                 }).eq('id', orderId);
                 if (updateStatusError) throw updateStatusError; // Lanzar si falla la actualización final
 
                 // Éxito total
-                console.log(`   ${logPrefix} Orden ${orderId} completada (Efectivo). Tiempo: ${Date.now() - start}ms`);
+                console.log(`   ${logPrefix} Orden ${orderId} completada (${payment_method}). Tiempo: ${Date.now() - start}ms`);
                 return res.status(200).json({
-                    message: "Venta en efectivo registrada y stock descontado.",
+                    message: `Venta por ${payment_method} registrada y stock descontado.`,
                     orderId: orderId,
                     receipt_number: orderId // Devolver ID como recibo
                 });
             } catch (updateError) {
                 console.error(`   ${logPrefix} ERROR al marcar orden ${orderId} como 'pagada':`, updateError.message);
                 // La venta se hizo y el stock se descontó, pero no se pudo marcar como pagada.
-                // Devolver un éxito parcial (207 Multi-Status)
+                // Devolver un éxito parcial (207 Multi-Status) para indicar el problema al frontend
                  return res.status(207).json({
-                     message: "Stock descontado, PERO error al actualizar estado final de la orden.",
+                     message: `Stock descontado, PERO error al actualizar estado final de la orden por ${payment_method}.`,
                      orderId: orderId,
                      receipt_number: orderId
                  });
@@ -281,10 +295,10 @@ app.post('/create_order', async (req, res) => {
         } else {
             // Si hubo errores al descontar stock
             console.error(`   ${logPrefix} FALLO al descontar stock para orden ${orderId}:`, deductionResult.errors);
-            // Marcar la orden con error de stock (ya se hace en deductStockForOrder)
+            // Marcar la orden con error de stock (ya se hace en deductStockForOrder a través de notas_internas)
             // Devolver error al frontend
             return res.status(409).json({ // 409 Conflict (problema de stock)
-                 message: "No se pudo completar la venta debido a errores de stock.",
+                 message: `No se pudo completar la venta por ${payment_method} debido a errores de stock.`,
                  orderId: orderId,
                  stockErrors: deductionResult.errors
             });
@@ -294,7 +308,7 @@ app.post('/create_order', async (req, res) => {
 
 
 /**
- * POST /mercado_pago_webhook
+ * POST /mercado_pago_webhook (Sin cambios en esta sección)
  * Recibe notificaciones de Mercado Pago sobre el estado de los pagos.
  * 1. Valida el tipo de notificación.
  * 2. Consulta la API de MP para obtener el estado real del pago.
@@ -409,7 +423,7 @@ app.post('/mercado_pago_webhook', async (req, res) => {
 // --- Ruta de Bienvenida / Health Check (Opcional) ---
 app.get('/', (req, res) => {
     res.send(`
-        <h1>Backend POS v3 Funcionando</h1>
+        <h1>Backend POS v4 Funcionando</h1>
         <p>Estado MP: ${isTestMode ? 'Prueba' : 'Producción'}</p>
         <p>Supabase URL: ${supabaseUrl ? supabaseUrl.split('.')[0] + '.supabase.co' : 'No configurada'}</p>
         <p>Timestamp: ${new Date().toISOString()}</p>
@@ -427,7 +441,7 @@ app.listen(port, () => {
 });
 
 
-// --- Recordatorio: Función RPC 'descontar_stock' necesaria en Supabase ---
+// --- Recordatorio: Función RPC 'descontar_stock' necesaria en Supabase (Sin cambios) ---
 /*
 -- Asegúrate de haber ejecutado esto en tu Editor SQL de Supabase:
 
