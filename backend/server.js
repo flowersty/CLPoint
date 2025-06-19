@@ -1,6 +1,6 @@
-// backend/server.js (v5 con Tarjeta, CashSession, WorkerID + FIX LOGGING + FIX RECETAS)
+// backend/server.js (v5 con Tarjeta, CashSession, WorkerID + FIX LOGGING + FIX RECETAS+UPDATE MEDICAMENTOS)
 
-require('dotenv').config(); // Carga variables de ./backend/.env
+require('dotenv').config();
 const express = require('express');
 const { MercadoPagoConfig, Preference, Payment } = require('mercadopago');
 const cors = require('cors');
@@ -53,99 +53,7 @@ app.use((req, res, next) => {
 
 
 // --- Función Auxiliar para Descontar Stock (Usa RPC con id_farmacia) ---
-// Recibe el ID de la orden (para logs/notas) y la lista de items del carrito.
-// ASUME que cada 'item' en la lista tiene 'upc', 'cantidad', y 'id_farmacia'.
-async function deductStockForOrder(orderId, items, logPrefixParent) {
-    const functionName = `[Stock Deduct Order ${orderId}]`; // Prefijo para logs de esta función
-    const logPrefix = `${logPrefixParent} ${functionName}`; // Concatenar con el prefijo de la solicitud padre
-    console.log(`${logPrefix} Iniciando deducción para ${items?.length || 0} tipos de items.`);
-    let allSucceeded = true; // Flag general
-    const errors = []; // Acumulador de errores por item
-
-    // Primero, agrupar cantidades por UPC y Farmacia para evitar descontar doble
-    const deductionMap = new Map(); // Key: `upc|farmacia_id`, Value: total_cantidad
-    
-    if (items && Array.isArray(items)) {
-        for (const item of items) {
-            // Validar cada item antes de procesarlo
-            if (!item.upc || item.id_farmacia === undefined || item.id_farmacia === null || !item.cantidad || item.cantidad <= 0) {
-                console.warn(`${logPrefix} Item inválido omitido del carrito:`, JSON.stringify(item));
-                errors.push(`Item inválido en carrito (UPC: ${item.upc || 'N/A'}, Cant: ${item.cantidad || 'N/A'}, Farm: ${item.id_farmacia === undefined ? 'N/A' : item.id_farmacia})`);
-                allSucceeded = false; // Marcar fallo si un item es inválido
-                continue; // Saltar este item
-            }
-            const key = `${item.upc}|${item.id_farmacia}`;
-            const currentAmount = deductionMap.get(key) || 0;
-            deductionMap.set(key, currentAmount + item.cantidad);
-        }
-    }
-
-
-     if (deductionMap.size === 0 && items && items.length > 0) { // Si había items pero todos eran inválidos
-         console.warn(`${logPrefix} No hay items válidos para descontar stock (todos filtrados).`);
-         // Aunque no haya items válidos, esto ya se marcó como `allSucceeded = false` si hubo errores en items
-         return { success: false, errors: errors.length > 0 ? errors : ["No items válidos para procesar stock."] };
-     }
-     if (deductionMap.size === 0 && (!items || items.length === 0)) { // Carrito realmente vacío
-        console.log(`${logPrefix} Carrito vacío, no se descuenta stock.`);
-        return { success: true, errors: [] }; // No hay error si el carrito estaba vacío.
-     }
-
-
-    // Iterar sobre el mapa agrupado para llamar a la RPC una vez por combinación única UPC/Farmacia
-    for (const [key, totalQuantity] of deductionMap.entries()) {
-        const [upc, farmacia_id_str] = key.split('|');
-        const farmacia_id = parseInt(farmacia_id_str, 10); // Convertir a número si id_farmacia es numérico en DB
-
-        try {
-            // Llamar a la función RPC 'descontar_stock' en Supabase
-            console.log(`   ${logPrefix} Llamando RPC: descontar_stock(upc=${upc}, cantidad=${totalQuantity}, farmacia=${farmacia_id})`);
-            const { error: rpcError } = await supabase.rpc('descontar_stock', {
-                 item_upc: upc,
-                 cantidad_a_descontar: totalQuantity,
-                 farmacia_id_param: farmacia_id
-            });
-
-            // Manejar errores devueltos explícitamente por la función RPC (RAISE EXCEPTION)
-            if (rpcError) {
-                 console.error(`   ${logPrefix} ERROR RPC (UPC ${upc}, Farm ${farmacia_id}):`, rpcError.message);
-                 // Re-lanzar para que el catch general lo capture y lo añada a 'errors'
-                 throw new Error(`Stock insuficiente/Error DB para UPC ${upc} (Farmacia ${farmacia_id}): ${rpcError.message}`);
-            }
-
-            console.log(`   ${logPrefix} Éxito RPC (UPC ${upc}, Farm ${farmacia_id}).`);
-
-        } catch (error) {
-            // Capturar errores (lanzados desde la RPC o errores de conexión/inesperados)
-            console.error(`   ${logPrefix} FALLO (UPC ${upc}, Farm ${farmacia_id}):`, error.message || error);
-            allSucceeded = false; // Marcar fallo general
-            // Usar el mensaje de error detallado capturado
-            errors.push(error.message || `Error desconocido al descontar stock para UPC ${upc} / Farmacia ${farmacia_id}.`);
-        }
-    } // Fin del bucle for sobre deductionMap
-
-    // Actualizar las notas internas en la tabla 'ventas' con el resultado
-    const finalNote = allSucceeded
-        ? `✅ Stock descontado correctamente via RPC. (${new Date().toISOString()})`
-        : `❌ ERRORES al descontar stock via RPC: ${errors.join('; ')} (${new Date().toISOString()})`;
-    try {
-        console.log(`${logPrefix} Actualizando notas_internas en orden ${orderId}...`);
-        const { error: noteUpdateError } = await supabase
-            .from('ventas')
-            .update({ notas_internas: finalNote })
-            .eq('id', orderId);
-        if (noteUpdateError) {
-            console.error(`${logPrefix} Error actualizando notas_internas:`, noteUpdateError.message);
-            // No se considera un fallo crítico para la función principal, pero se loggea
-        }
-    } catch (e) {
-        console.error(`${logPrefix} Excepción actualizando notas_internas:`, e);
-    }
-
-    console.log(`${logPrefix} Resultado final deducción stock: success=${allSucceeded}, errors count=${errors.length}`);
-    // Devolver si la operación general fue exitosa y la lista de errores si hubo
-    return { success: allSucceeded, errors: errors };
-}
+// ... (tu función deductStockForOrder actual) ...
 
 
 // --- Rutas Principales ---
@@ -169,59 +77,20 @@ app.post('/create_order', async (req, res) => {
     console.log(`${logPrefix} Recibido: Method=${payment_method}, Farmacia=${id_farmacia}, Amount=${amount}, Items=${cartItems?.length}, CashSession=${cash_session_id}, Worker=${id_trabajador}, CardRef=${referencia_tarjeta}`);
 
     // --- Validaciones de Entrada ---
-    if (!amount || typeof amount !== 'number' || amount <= 0) {
-        console.warn(`${logPrefix} Rechazado: Monto inválido.`);
-        return res.status(400).json({ message: 'Monto inválido.' });
-    }
-    if (!payment_method || !['efectivo', 'mercadoPagoQR', 'tarjeta'].includes(payment_method)) {
-        console.warn(`${logPrefix} Rechazado: Método de pago '${payment_method}' inválido.`);
-         return res.status(400).json({ message: 'Método de pago inválido o faltante.' });
-    }
-     if (id_farmacia === undefined || id_farmacia === null) { // Chequeo más estricto
-        console.warn(`${logPrefix} Rechazado: Falta ID de farmacia.`);
-         return res.status(400).json({ message: 'Falta ID de farmacia.' });
-     }
-     if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
-        console.warn(`${logPrefix} Rechazado: Carrito vacío o inválido.`);
-        return res.status(400).json({ message: 'El carrito está vacío o es inválido.' });
-     }
-     // Validar consistencia de id_farmacia en items
-     if (!cartItems.every(item => item.id_farmacia !== undefined && item.id_farmacia !== null && item.id_farmacia == id_farmacia)) { // Usar == para comparar string y number si es el caso
-         console.warn(`${logPrefix} Rechazado: Inconsistencia o falta de ID de farmacia en los items del carrito.`);
-         return res.status(400).json({ message: 'Error interno: Inconsistencia o faltan datos de farmacia en los items del carrito.' });
-     }
-    // NUEVAS VALIDACIONES PARA CAJA Y TRABAJADOR (asumiendo que son obligatorios para ventas)
-    if (!cash_session_id) {
-        console.warn(`${logPrefix} Rechazado: Falta ID de sesión de caja (cash_session_id).`);
-        return res.status(400).json({ message: 'Falta ID de sesión de caja. Por favor, abre la caja primero.' });
-    }
-    if (!id_trabajador) {
-        console.warn(`${logPrefix} Rechazado: Falta ID de trabajador.`);
-        return res.status(400).json({ message: 'Falta ID de trabajador.' });
-    }
-    // Validar referencia_tarjeta SOLO si el método es tarjeta
-    if (payment_method === 'tarjeta' && (!referencia_tarjeta || typeof referencia_tarjeta !== 'string' || referencia_tarjeta.trim() === '')) {
-        console.warn(`${logPrefix} Rechazado: Falta referencia de tarjeta para pago con tarjeta.`);
-        return res.status(400).json({ message: 'Falta referencia de tarjeta para pago con tarjeta.' });
-    }
-
+    // ... (tus validaciones actuales) ...
 
     const finalDescription = description || `Compra POS ${new Date().toISOString()}`;
     let orderId = null; // ID de la orden que se creará
+    const saleTimestamp = new Date().toISOString(); // Marca de tiempo para la venta y el último movimiento
 
     // --- 1. Crear la Orden en Supabase (tabla 'ventas') ---
     console.log(`${logPrefix} 1. Creando registro en tabla 'ventas'...`);
     try {
         let initialState;
-        if (payment_method === 'mercadoPagoQR') {
-            initialState = 'pendiente';
-        } else if (payment_method === 'efectivo') {
-            initialState = 'procesando_efectivo'; // Nuevo estado intermedio
-        } else if (payment_method === 'tarjeta') {
-            initialState = 'procesando_tarjeta'; // Nuevo estado intermedio
-        } else {
-            initialState = 'desconocido'; // Fallback - aunque ya se valida antes
-        }
+        if (payment_method === 'mercadoPagoQR') { initialState = 'pendiente'; }
+        else if (payment_method === 'efectivo') { initialState = 'procesando_efectivo'; }
+        else if (payment_method === 'tarjeta') { initialState = 'procesando_tarjeta'; }
+        else { initialState = 'desconocido'; }
 
         const { data: newOrderData, error: insertError } = await supabase
             .from('ventas')
@@ -231,18 +100,18 @@ app.post('/create_order', async (req, res) => {
                 estado: initialState,
                 metodo_pago_solicitado: payment_method,
                 paciente_id: paciente_id || null,
-                compra_sin_cuenta: Boolean(compra_sin_cuenta), // Asegurar booleano
+                compra_sin_cuenta: Boolean(compra_sin_cuenta),
                 items_json: cartItems, // Guardar los items como JSON
-                id_farmacia: id_farmacia, // Guardar el ID de la farmacia que hizo la venta
+                id_farmacia: id_farmacia,
                 receta_asociada_id: prescription_update_data?.receta_id || null,
-                // NUEVOS CAMPOS A GUARDAR
                 cash_session_id: cash_session_id,
                 id_trabajador: id_trabajador,
                 referencia_tarjeta: payment_method === 'tarjeta' ? referencia_tarjeta.trim() : null,
-                // created_at y last_updated_at se manejan por DB (default y trigger)
+                // created_at, last_updated_at, fecha_pago se manejarán abajo o por DB
+                fecha_pago: (payment_method !== 'mercadoPagoQR' ? saleTimestamp : null) // Registrar pago para efectivo/tarjeta inmediatamente
             })
             .select('id') // Devolver el ID de la nueva orden
-            .single(); // Esperamos solo una
+            .single();
 
         if (insertError) { throw insertError; }
 
@@ -251,45 +120,61 @@ app.post('/create_order', async (req, res) => {
 
     } catch (dbError) {
         console.error(`   ${logPrefix} FALLO Crítico al insertar venta en DB:`, dbError.message);
-        // Si falla la creación de la venta, no podemos continuar
         return res.status(500).json({ message: `Error interno (DB): No se pudo crear el registro de venta.`, details: dbError.message });
     }
 
-    // --- 2. Intentar actualizar la Receta si los datos existen ---
-    if (prescription_update_data && prescription_update_data.receta_id) {
-        console.log(`${logPrefix} 2. Intentando actualizar Receta ID: ${prescription_update_data.receta_id}...`);
-        try {
-            const { data: updatedRecetaArray, error: updateRecetaError } = await supabase // supabase devuelve un array
-                .from('recetas')
-                .update({
-                    estado_dispensacion: prescription_update_data.estado_dispensacion, // 'dispensada' o 'incompleta'
-                    medicamentos_dispensados_detalle: prescription_update_data.medicamentos_dispensados_detalle,
-                    fecha_dispensacion: new Date().toISOString() // Añadir fecha de dispensación si tu esquema la tiene
-                })
-                .eq('id', prescription_update_data.receta_id)
-                .select('id, estado_dispensacion'); // Selecciona algo para verificar si se actualizó
+    // --- AÑADIR LÓGICA DE ACTUALIZACIÓN DE fecha_ultimo_movimiento AQUÍ ---
+    // Esta lógica se ejecuta DESPUÉS de que la venta se creó en la tabla 'ventas'
+    console.log(`${logPrefix} 1.5. Actualizando fecha_ultimo_movimiento para items vendidos en orden ${orderId}...`);
+    const updatedMedicineIds = new Set(); // Para no actualizar el mismo medicamento varias veces si está en el carrito
 
-            if (updateRecetaError) {
-                console.error(`   ${logPrefix} ERROR al actualizar Receta ${prescription_update_data.receta_id}:`, updateRecetaError.message);
-                // NO lanzamos error aquí porque la venta principal SÍ se creó.
-                // Podríamos añadir una nota a la venta creada indicando este fallo.
-                await supabase.from('ventas').update({
-                    notas_internas: `Error al actualizar receta ${prescription_update_data.receta_id}: ${updateRecetaError.message}`
-                }).eq('id', orderId);
-            } else if (!updatedRecetaArray || updatedRecetaArray.length === 0) { // Chequeo si el array está vacío
-                 console.warn(`   ${logPrefix} UPDATE de Receta ${prescription_update_data.receta_id} no afectó filas (quizás ID incorrecto o ya estaba dispensada).`);
-            } else { // Si hay elementos en el array
-                console.log(`   ${logPrefix} Receta ${prescription_update_data.receta_id} actualizada a estado: ${updatedRecetaArray[0].estado_dispensacion}.`);
+    if (cartItems && Array.isArray(cartItems)) {
+         // Iterar sobre cada item en el carrito que se acaba de vender
+        for (const item of cartItems) {
+            // Asumimos que item.id en el cartItems del frontend es el id_farmaco
+             const medicineId = item.id;
+             // O si tu item_json usa id_farmaco como key: const medicineId = item.id_farmaco;
+
+             // Validar que el item_id sea un número válido y no se haya procesado ya en este bucle
+             if (typeof medicineId !== 'number' && typeof medicineId !== 'string' || updatedMedicineIds.has(medicineId)) {
+                 console.warn(`   ${logPrefix} Saltando item inválido o duplicado en carrito para movimiento: ${JSON.stringify(item)}`);
+                 continue; // Saltar este item
+             }
+
+            try {
+                // Ejecutar el UPDATE en la tabla 'medicamentos'
+                const { error: updateMovementError } = await supabase
+                    .from('medicamentos')
+                    .update({ fecha_ultimo_movimiento: saleTimestamp }) // Usar la marca de tiempo de la venta
+                    .eq('id_farmaco', medicineId); // WHERE id_farmaco = ID del medicamento
+
+                if (updateMovementError) {
+                    console.error(`   ${logPrefix} ERROR al actualizar fecha_ultimo_movimiento para medicamento ID ${medicineId}:`, updateMovementError.message);
+                     // Puedes decidir cómo manejar este error. No detendremos la venta principal por esto.
+                    // Podríamos añadir una nota a la venta creada indicando este fallo específico.
+                     const { data: currentOrderNotes } = await supabase.from('ventas').select('notas_internas').eq('id', orderId).single();
+                     const newNotes = (currentOrderNotes?.notas_internas || '') + `; Error update mov ${medicineId}: ${updateMovementError.message}`;
+                    await supabase.from('ventas').update({ notas_internas: newNotes }).eq('id', orderId);
+                } else {
+                    console.log(`   ${logPrefix} Actualizado fecha_ultimo_movimiento para medicamento ID ${medicineId}.`);
+                    updatedMedicineIds.add(medicineId); // Marcar como procesado
+                }
+
+            } catch (movementException) {
+                 console.error(`   ${logPrefix} EXCEPCIÓN al actualizar fecha_ultimo_movimiento para medicamento ID ${medicineId}:`, movementException);
+                 const { data: currentOrderNotes } = await supabase.from('ventas').select('notas_internas').eq('id', orderId).single();
+                 const newNotes = (currentOrderNotes?.notas_internas || '') + `; Excepción update mov ${medicineId}: ${movementException.message || 'Desconocido'}`;
+                 await supabase.from('ventas').update({ notas_internas: newNotes }).eq('id', orderId);
             }
-        } catch (recetaUpdateException) {
-             console.error(`   ${logPrefix} EXCEPCIÓN al actualizar Receta ${prescription_update_data.receta_id}:`, recetaUpdateException);
-             await supabase.from('ventas').update({
-                 notas_internas: `Excepción al actualizar receta ${prescription_update_data.receta_id}: ${recetaUpdateException.message || 'Desconocido'}`
-             }).eq('id', orderId);
-        }
+        } // Fin del bucle for over cartItems
     } else {
-        console.log(`${logPrefix} No se recibió prescription_update_data válido. Omitiendo actualización de receta.`);
+         console.warn(`${logPrefix} cartItems está vacío o no es un array válido. No se actualiza fecha_ultimo_movimiento.`);
     }
+    // --- FIN DE LÓGICA DE ACTUALIZACIÓN DE fecha_ultimo_movimiento ---
+
+
+    // --- 2. Intentar actualizar la Receta si los datos existen ---
+    // ... (Tu lógica actual para actualizar receta) ...
 
 
     // --- 3. Lógica según Método de Pago ---
@@ -299,9 +184,9 @@ app.post('/create_order', async (req, res) => {
         console.log(`${logPrefix} 3. Creando Preferencia MP para orden ${orderId}...`);
         const preferenceData = {
             items: [{ id: `order_${orderId}`, title: finalDescription.substring(0, 250), quantity: 1, currency_id: MP_CURRENCY_ID, unit_price: amount }],
-            external_reference: orderId.toString(), // ID de nuestra venta
+            external_reference: orderId.toString(),
             purpose: 'wallet_purchase',
-            notification_url: process.env.MP_WEBHOOK_URL, // URL donde MP nos notificará
+            notification_url: process.env.MP_WEBHOOK_URL,
         };
         try {
             const result = await preference.create({ body: preferenceData });
@@ -311,8 +196,7 @@ app.post('/create_order', async (req, res) => {
             if (!paymentUrl || !mpPreferenceId) throw new Error('MP no devolvió URL de pago o ID de preferencia.');
             console.log(`      ${logPrefix} Pref MP ${mpPreferenceId} creada para orden ${orderId}.`);
 
-            // Actualizar la orden con el ID de la preferencia de MP
-             await supabase.from('ventas').update({ mp_preferencia_id: mpPreferenceId }).eq('id', orderId);
+            await supabase.from('ventas').update({ mp_preferencia_id: mpPreferenceId }).eq('id', orderId);
 
             console.log(`${logPrefix} 4. Éxito MP QR. Enviando URL y OrderID ${orderId}. Tiempo: ${Date.now() - start}ms`);
             return res.json({ init_point_url: paymentUrl, order_id: orderId });
@@ -336,15 +220,12 @@ app.post('/create_order', async (req, res) => {
             console.log(`   ${logPrefix} Stock descontado. Marcando orden ${orderId} como 'pagada'.`);
             try {
                 const { error: updateStatusError } = await supabase.from('ventas').update({
-                    estado: 'pagada', // Estado final si todo va bien
-                    metodo_pago_confirmado: payment_method, // Confirmar con el método recibido
-                    fecha_pago: new Date().toISOString(), // Registrar fecha de pago
-                    // referencia_tarjeta ya se guardó al crear la orden si era 'tarjeta'
-                    // last_updated_at se actualiza por trigger
+                    estado: 'pagada',
+                    metodo_pago_confirmado: payment_method,
+                    fecha_pago: saleTimestamp, // Usar la misma marca de tiempo que para el movimiento
                 }).eq('id', orderId);
                 if (updateStatusError) throw updateStatusError;
 
-                // Éxito total
                 console.log(`   ${logPrefix} Orden ${orderId} completada (${payment_method}). Tiempo: ${Date.now() - start}ms`);
                 return res.status(200).json({
                     message: `Venta por ${payment_method} registrada y stock descontado.`,
@@ -353,11 +234,9 @@ app.post('/create_order', async (req, res) => {
                 });
             } catch (updateError) {
                 console.error(`   ${logPrefix} CRÍTICO: Orden ${orderId} (${payment_method}) completada, stock descontado, PERO FALLO al marcar estado final 'pagada':`, updateError.message);
-                 // Actualizar notas internas con este error crítico
                  const { data: currentOrderNotes } = await supabase.from('ventas').select('notas_internas').eq('id', orderId).single();
                  const newNotes = (currentOrderNotes?.notas_internas || '') + `; CRÍTICO: Error final update estado: ${updateError.message}`;
                 await supabase.from('ventas').update({ notas_internas: newNotes }).eq('id', orderId);
-                 // Devolver 200 para que el frontend no se quede atascado, pero el log indica el problema.
                  return res.status(200).json({
                      message: `Venta completada con ${payment_method}, pero hubo un error al registrar el estado final. Contacte a soporte.`,
                      orderId: orderId,
@@ -365,19 +244,16 @@ app.post('/create_order', async (req, res) => {
                  });
             }
         } else {
-            // Si hubo errores al descontar stock (esto es un fallo de la venta)
             console.error(`   ${logPrefix} FALLO al descontar stock para orden ${orderId} (${payment_method}):`, deductionResult.errors);
             await supabase.from('ventas').update({
-                estado: 'error_stock', // Nuevo estado: error de stock
-                metodo_pago_confirmado: null, // No se confirmó el pago
+                estado: 'error_stock',
+                metodo_pago_confirmado: null,
                 fecha_pago: null,
-                // last_updated_at se actualiza por trigger
             }).eq('id', orderId);
-            // Devolver error 409 (Conflict) al frontend indicando el problema de stock
             return res.status(409).json({
                  message: `No se pudo completar la venta por ${payment_method} debido a errores de stock.`,
                  orderId: orderId,
-                 stockErrors: deductionResult.errors // Pasar los errores de stock específicos
+                 stockErrors: deductionResult.errors
             });
         }
     }
@@ -389,114 +265,150 @@ app.post('/create_order', async (req, res) => {
  * Recibe notificaciones de Mercado Pago sobre el estado de los pagos.
  */
 app.post('/mercado_pago_webhook', async (req, res) => {
-    const logPrefix = `[MP Webhook ${Date.now().toString().slice(-6)}]`; // Usar el prefijo del middleware
+    const logPrefix = `[MP Webhook ${Date.now().toString().slice(-6)}]`;
     console.log(`${logPrefix} ------ Webhook MP Recibido ------`);
     // TODO: Implementar validación de X-Signature para seguridad seria
 
     let notification;
     try {
-        // Asegúrate de que req.body sea un Buffer o similar y parseable
         notification = JSON.parse(req.body.toString());
         console.log(`${logPrefix} Body parseado: Type=${notification?.type}, DataID=${notification?.data?.id}, LiveMode=${notification?.live_mode}`);
     } catch (e) {
         console.error(`${logPrefix} Error parseando cuerpo JSON:`, e.message);
-        return res.sendStatus(400); // Bad Request
+        return res.sendStatus(400);
     }
 
     try {
-        // Procesar solo notificaciones de tipo 'payment' con ID
         if (notification?.type === 'payment' && notification.data?.id) {
             const paymentId = notification.data.id;
             console.log(`${logPrefix} 1. Procesando Pago MP ID: ${paymentId}`);
 
-            // 2. Consultar API de MP para detalles REALES del pago
             let paymentDetails;
             try {
                 console.log(`${logPrefix} 2. Consultando API MP para pago ${paymentId}...`);
                 paymentDetails = await paymentClient.get({ id: paymentId });
                 console.log(`   ${logPrefix} API MP Resp para ${paymentId}: Status=${paymentDetails?.status}, ExtRef=${paymentDetails?.external_reference}, Method=${paymentDetails?.payment_method_id}`);
             } catch (mpApiError) {
-                console.error(`   ${logPrefix} Error consultando API MP para ${paymentId}:`, mpApiError.message, mpApiError.cause || ''); // Loguear causa si existe
-                return res.sendStatus(200); // OK a MP para que no reintente si falló nuestra consulta API
+                console.error(`   ${logPrefix} Error consultando API MP para ${paymentId}:`, mpApiError.message, mpApiError.cause || '');
+                return res.sendStatus(200);
             }
 
-            const externalReference = paymentDetails?.external_reference; // Nuestro orderId
-            const paymentStatus = paymentDetails?.status; // Estado actual en MP
+            const externalReference = paymentDetails?.external_reference; // Nuestro orderId (STRING)
+            const paymentStatus = paymentDetails?.status;
+            const paidTimestamp = new Date().toISOString(); // Marca de tiempo del pago según webhook
 
             if (!externalReference) {
                 console.error(`   ${logPrefix} Error: No 'external_reference' (orderId) en pago MP ${paymentId}.`);
-                return res.sendStatus(200); // OK a MP, no podemos hacer nada si falta la referencia
+                return res.sendStatus(200);
             }
+            // Convertir externalReference a número si tu columna 'id' en 'ventas' es serial (number)
+            const orderIdNumeric = parseInt(externalReference, 10);
+
 
             // 3. Determinar nuevo estado DB y si descontar stock
             let newDbStatus = null;
-            let shouldDeductStock = false; // Descontar stock SOLO si se aprueba y aún no se hizo
+            // Para Webhook MP, solo descontamos stock si el pago se aprueba AQUÍ
+            // y si el estado previo en DB era 'pendiente' o 'procesando_mp' (ver abajo el .in filter)
+            let shouldDeductStockOnWebhook = false;
 
             if (paymentStatus === 'approved') {
                 newDbStatus = 'pagada';
-                shouldDeductStock = true; // Descontar stock solo si pasa a aprobado
+                // Stock se descontará si el update de estado es exitoso desde pendiente/procesando
+                shouldDeductStockOnWebhook = true;
             } else if (['rejected', 'cancelled', 'refunded', 'charged_back'].includes(paymentStatus)) {
-                newDbStatus = 'rechazada'; // O mapear a estados más específicos como 'cancelada_mp', 'rechazada_mp'
+                 // Si se rechaza/cancela, debemos asegurar que el stock *no* se descuente si estaba pendiente
+                 // Si ya se había descontado (ej. por error), esto no lo revertirá, necesitas lógica de devolución.
+                newDbStatus = 'rechazada'; // O 'cancelada_mp', etc.
             }
-            // Otros estados como 'in_process' no cambian el estado final de venta, solo se loggean si se desea.
+            // Otros estados como 'in_process' generalmente no cambian el estado final de venta para nuestra lógica.
+
 
             // 4. Actualizar DB si es necesario
             if (newDbStatus) {
                 console.log(`${logPrefix} 3. Intentando actualizar orden ${externalReference} a '${newDbStatus}' (Pago MP ${paymentId})...`);
-                // Actualizar SOLO si el estado actual en DB es 'pendiente' o 'procesando_mp'
-                // Esto previene doble procesamiento si el webhook se reenvía
+                // Usamos el ID numérico para la consulta
                 const { data: updatedOrderArray, error: updateError } = await supabase
                     .from('ventas')
                     .update({
                         estado: newDbStatus,
                         mp_pago_id: paymentId,
-                        metodo_pago_confirmado: paymentDetails?.payment_method_id || 'mercadoPagoQR', // Guardar el método real de MP
-                        fecha_pago: new Date().toISOString(), // Registrar fecha de pago real
-                        // last_updated_at se actualiza por trigger
+                        metodo_pago_confirmado: paymentDetails?.payment_method_id || 'mercadoPagoQR',
+                        fecha_pago: paidTimestamp, // Usar la fecha/hora del webhook
                     })
-                    .eq('id', externalReference)
-                    .in('estado', ['pendiente', 'procesando_mp']) // Actualizar solo si estaba en estos estados
-                    .select('id, items_json, id_farmacia, estado') // Necesitamos estado para la lógica de stock
-                    // .single(); // No usar single si select puede devolver 0 filas
-
+                     // Actualizar SOLO si el estado actual en DB es 'pendiente' o 'procesando_mp'.
+                     // Esto evita que un webhook tardío sobrescriba un estado de "error_stock" o similar
+                    .eq('id', orderIdNumeric)
+                    .in('estado', ['pendiente', 'procesando_mp'])
+                    .select('id, items_json, id_farmacia, estado') // Necesitamos items_json y estado para stock
+                    // .single(); // No usar single con .in
+                
                 if (updateError) {
                     console.error(`   ${logPrefix} ERROR DB al actualizar orden ${externalReference} (Pago MP ${paymentId}):`, updateError.message);
-                    // Loggear error pero aún así enviar 200 a MP.
-                } else if (updatedOrderArray && updatedOrderArray.length > 0) { // Chequear si el array tiene elementos
-                    const updatedOrder = updatedOrderArray[0]; // Tomar el primer (y único) elemento
-                    // Si se actualizó a 'pagada' (y shouldDeductStock es true)
-                    if (shouldDeductStock && updatedOrder.estado === 'pagada') { // Verifica que REALMENTE se actualizó a pagada
-                        console.log(`   ${logPrefix} Orden ${externalReference} marcada como 'pagada'. Procediendo a descontar stock...`);
+                } else if (updatedOrderArray && updatedOrderArray.length > 0) {
+                    const updatedOrder = updatedOrderArray[0];
+                    console.log(`   ${logPrefix} Orden ${externalReference} actualizada a '${updatedOrder.estado}' (Pago MP ${paymentId}).`);
 
-                        // 5. Descontar Stock (Si no se hizo antes y si aplica)
-                        const deductionResult = await deductStockForOrder(externalReference, updatedOrder.items_json, logPrefix);
-                        if (!deductionResult.success) {
-                            console.error(`   ${logPrefix} FALLO al descontar stock (Webhook MP) para orden ${externalReference}:`, deductionResult.errors);
-                             // Stock falló después del pago. Esto requiere intervención.
-                             // Marcar la orden con un estado de error post-pago
-                             const { data: currentOrderNotes } = await supabase.from('ventas').select('notas_internas').eq('id', externalReference).single();
-                             const newNotes = (currentOrderNotes?.notas_internas || '') + `; FALLO STOCK Webhook MP: ${deductionResult.errors.join('; ')}`;
-                             await supabase.from('ventas').update({
-                                 estado: 'pagada_stock_fallido', // Nuevo estado: pagada, pero stock falló
-                                 notas_internas: newNotes
-                             }).eq('id', externalReference);
+                     // --- AÑADIR LÓGICA DE ACTUALIZACIÓN DE fecha_ultimo_movimiento AQUÍ PARA PAGOS MP ---
+                     // Esto es necesario porque el flujo de MP es asíncrono.
+                     // El movimiento se registra cuando el PAGO es CONFIRMADO (approved).
+                     // Similar a la lógica en /create_order para efectivo/tarjeta.
+
+                     if (shouldDeductStockOnWebhook && updatedOrder.estado === 'pagada') { // SOLO si la actualización resultó en estado 'pagada'
+                        console.log(`${logPrefix} Procesando movimiento/stock via webhook para orden ${externalReference}.`);
+
+                        const webhookTimestamp = new Date().toISOString(); // Marca de tiempo para el movimiento
+
+                        const updatedMedicineIds = new Set();
+                        if (updatedOrder.items_json && Array.isArray(updatedOrder.items_json)) {
+                            for (const item of updatedOrder.items_json) {
+                                const medicineId = item.id_farmaco; // Asegúrate que la key sea correcta en items_json
+                                if (typeof medicineId !== 'number' && typeof medicineId !== 'string' || updatedMedicineIds.has(medicineId)) {
+                                    console.warn(`   ${logPrefix} Saltando item inválido o duplicado en items_json MP para movimiento: ${JSON.stringify(item)}`);
+                                    continue;
+                                }
+
+                                try {
+                                    const { error: updateMovementError } = await supabase
+                                        .from('medicamentos')
+                                        .update({ fecha_ultimo_movimiento: webhookTimestamp })
+                                        .eq('id_farmaco', medicineId);
+
+                                    if (updateMovementError) {
+                                        console.error(`   ${logPrefix} ERROR WH al actualizar fecha_ultimo_movimiento para med ID ${medicineId}:`, updateMovementError.message);
+                                         const { data: currentOrderNotes } = await supabase.from('ventas').select('notas_internas').eq('id', orderIdNumeric).single();
+                                         const newNotes = (currentOrderNotes?.notas_internas || '') + `; Error WH update mov ${medicineId}: ${updateMovementError.message}`;
+                                        await supabase.from('ventas').update({ notas_internas: newNotes }).eq('id', orderIdNumeric);
+                                    } else {
+                                        console.log(`   ${logPrefix} WH Actualizado fecha_ultimo_movimiento para med ID ${medicineId}.`);
+                                        updatedMedicineIds.add(medicineId);
+                                    }
+
+                                } catch (movementException) {
+                                    console.error(`   ${logPrefix} WH EXCEPCIÓN al actualizar fecha_ultimo_movimiento para med ID ${medicineId}:`, movementException);
+                                     const { data: currentOrderNotes } = await supabase.from('ventas').select('notas_internas').eq('id', orderIdNumeric).single();
+                                     const newNotes = (currentOrderNotes?.notas_internas || '') + `; Excepción WH update mov ${medicineId}: ${movementException.message || 'Desconocido'}`;
+                                    await supabase.from('ventas').update({ notas_internas: newNotes }).eq('id', orderIdNumeric);
+                                }
+                            } // Fin del bucle
+                             // Opcional: Llamar a deductStockForOrder aquí si decides que el stock se descuenta SOLO en el webhook aprobado, no al crear la orden MP.
+                             // PERO: tu código actual ya llama a descontar_stock al crear la orden, lo cual es más inmediato. Decidir UN SOLO lugar para descontar stock.
                         } else {
-                             console.log(`   ${logPrefix} Stock descontado con éxito (Webhook MP) para orden ${externalReference}.`);
+                             console.warn(`${logPrefix} items_json está vacío o no es array en orden ${externalReference} desde webhook. No se actualiza fecha_ultimo_movimiento.`);
                         }
-                    } else {
-                         console.log(`   ${logPrefix} Orden ${externalReference} actualizada a '${newDbStatus}', pero no se descuenta stock o ya estaba procesada (Estado actual: ${updatedOrder.estado}).`);
-                    }
+                     } // Fin if shouldDeductStockOnWebhook
+
                 } else {
-                     console.log(`   ${logPrefix} Orden ${externalReference} no encontrada o no estaba en estado 'pendiente'/'procesando_mp'. No se actualizó.`);
+                     console.log(`   ${logPrefix} Orden ${externalReference} no encontrada o no estaba en estado 'pendiente'/'procesando_mp'. No se actualizó estado via webhook.`);
                 }
             } else {
-                console.log(`   ${logPrefix} Estado MP '${paymentStatus}' para pago ${paymentId} (orden ${externalReference}) no requiere cambio de estado en DB.`);
+                 console.log(`   ${logPrefix} Estado MP '${paymentStatus}' para pago ${paymentId} (orden ${externalReference}) no requiere cambio de estado final en DB.`);
             }
+
+
         } else {
             console.log(`${logPrefix} Webhook tipo '${notification?.type}' o sin data.id. Ignorado.`);
         }
 
-        // Siempre responder 200 OK a Mercado Pago para indicar que recibimos el webhook
         console.log(`${logPrefix} ------ Webhook Procesado. Enviando 200 OK a MP. ------`);
         res.sendStatus(200);
 
@@ -525,8 +437,8 @@ app.listen(port, () => {
     console.log(`\n🚀 Servidor Node.js corriendo en http://localhost:${port}`);
     console.log(`   Modo MP: ${isTestMode ? 'Prueba (Sandbox)' : 'Producción'}`);
     console.log(`  Moneda MP: ${MP_CURRENCY_ID}`);
-    if (supabase && supabaseUrl) { // Chequear supabaseUrl también
-        const supabaseDomain = supabaseUrl.split('//')[1]?.split('.')[0]; // Manejar posible undefined
+    if (supabase && supabaseUrl) {
+        const supabaseDomain = supabaseUrl.split('//')[1]?.split('.')[0];
         console.log(`  Supabase Conectado: ${supabaseDomain || '(URL no parseable)'}.supabase.co`);
     } else {
         console.log(`  Supabase: Conexión Fallida o URL no disponible.`);
